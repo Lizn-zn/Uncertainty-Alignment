@@ -123,53 +123,11 @@ class ensemble_model(nn.Module):
             w1 = torch.unsqueeze((weight2 / (2*(weight1+weight2))+0.0), -1)
             w2 = torch.unsqueeze((weight1 / (2*(weight1+weight2))+0.5), -1)
             output = torch.mul(mean_pred1 / loops, w1) + torch.mul(mean_pred2 / loops, w2)
-        elif self.ensemble == 'scaledinf':
-            old_model = self.model1
-            new_model = self.model2
-            old_model.cuda()
-            new_model.cuda()
-            old_logit = output1.clone()
-            new_logit = output2.clone()
-
-            def solveT(old_logit, new_logit, init_T = 1.0):
-                T1 = nn.Parameter(torch.ones(1).cuda() * init_T)
-                optimizer = optim.LBFGS([T1], lr=1)
-                mse_loss = nn.MSELoss()
-                # nll_criterion = nn.CrossEntropyLoss().cuda()
-                def eval():
-                    optimizer.zero_grad()
-                    p = F.softmax(temperature_scale(old_logit, T1), dim=-1)
-                    q = F.softmax(new_logit, dim=-1)
-                    # loss = F.kl_div(p.log(), q, reduction='batchmean') + F.kl_div(q.log(), p, reduction='batchmean')
-                    loss = mse_loss(p, q) + 5e-4 * T1.square()
-                    loss.backward()
-                    return loss
-                optimizer.step(eval)
-                return T1
-            
-            init_list = [1.0, 1.5, 2.0]
-            best_loss = 1e6
-            for T in init_list:
-                mse_loss = nn.MSELoss()
-                T1 = solveT(old_logit, new_logit, init_T = T)
-                with torch.no_grad():
-                    p = F.softmax(temperature_scale(old_logit, T1), dim=-1)
-                    q = F.softmax(new_logit, dim=-1)
-                    # loss = F.kl_div(p.log(), q, reduction='batchmean') + F.kl_div(q.log(), p, reduction='batchmean')
-                    loss = mse_loss(p, q) # + 5e-4 * T1.square()
-                if loss.item() < best_loss and T1.item() > 0:
-                    best_T = T1
-                    best_loss = loss.item()
-            self.T1 = best_T
-            self.T2 = nn.Parameter(torch.ones(1).cuda())
-            self.k = torch.Tensor([0.5]).cuda()
-            old_confs = F.softmax(temperature_scale(output1, self.T1), dim=-1)
-            new_confs = F.softmax(temperature_scale(output2, self.T2), dim=-1)
-            output = old_confs * self.k + new_confs * (1-self.k)
         else:
             raise NotImplementedError(opt.ensemble)
         return output
 
+    # using labeled data to compute the optimal weight
     def scaling(self, data_loader, opt):
         old_model = self.model1
         new_model = self.model2
@@ -230,6 +188,7 @@ class ensemble_model(nn.Module):
         print(self.k)
         return self.T1, self.T2, self.k
 
+    # the temperature scaling method
     def scaling_unlabel(self, data_loader, opt):
         old_model = self.model1
         new_model = self.model2
@@ -299,107 +258,7 @@ class ensemble_model(nn.Module):
         self.k = torch.Tensor([0.5])
 
 
-    def compare(self, data_loader, opt):
-        old_model = self.model1
-        new_model = self.model2
-        old_model.cuda()
-        new_model.cuda()
-        old_logit_list = []
-        new_logit_list = []
-        labels_list = []
-        with torch.no_grad():
-            for inputs, label in data_loader:
-                inputs = inputs.cuda()
-                old_logit = old_model(inputs)
-                new_logit = new_model(inputs)
-                old_logit_list.append(old_logit)
-                new_logit_list.append(new_logit)
-                labels_list.append(label)
-            old_logit_list = torch.cat(old_logit_list).detach()
-            new_logit_list = torch.cat(new_logit_list).detach()
-            labels = torch.cat(labels_list).cuda()
 
-        def eval(k):
-            output = p_ * k + q_ * (1-k)
-            conf, pred = torch.max(output, 1)
-            acc = (pred == labels).float().mean()
-            nfr = torch.logical_and(old_pred == labels, pred != labels).float().mean()
-            return acc, nfr
-
-
-        # p_ = F.softmax(old_logit_list, dim=-1)
-        T1 = torch.ones(1).cuda()*opt.T1
-        T2 = torch.ones(1).cuda()*opt.T2
-        old_logit_list = old_logit_list / T1
-        new_logit_list = new_logit_list / T2
-        p_ = F.softmax(old_logit_list, dim=-1)
-        q_ = F.softmax(new_logit_list, dim=-1)
-        p, old_pred  = torch.max(p_, 1)
-        q, new_pred  = torch.max(q_, 1)
-        acc0, nfr0 = eval(0.0)
-        interval = np.arange(0.0, 1.001, 0.001)
-        acc_list = []
-        nfr_list = []
-        for i in range(len(interval)):
-            k = interval[i]
-            acc, nfr = eval(k)
-            acc_list.append(acc.item())
-            nfr_list.append(nfr.item())
-        np.savetxt('curves1.csv', [acc_list, nfr_list])
-        
-        best_T = solveT(old_logit_list, new_logit_list)
-        print('set T by {}'.format(best_T.item()))
-        self.T1 = best_T
-        self.T2 = nn.Parameter(torch.ones(1).cuda())
-        self.k = torch.Tensor([0.5])
-        p_ = F.softmax(temperature_scale(old_logit_list, self.T1), dim=-1)
-        q_ = F.softmax(new_logit_list, dim=-1)
-        p, old_pred  = torch.max(p_, 1)
-        q, new_pred  = torch.max(q_, 1)
-
-        acc0, nfr0 = eval(0.0)
-        interval = np.arange(0.0, 1.001, 0.001)
-        acc_list = []
-        nfr_list = []
-        for i in range(len(interval)):
-            k = interval[i]
-            acc, nfr = eval(k)
-            acc_list.append(acc.item())
-            nfr_list.append(nfr.item())
-        np.savetxt('curves2.csv', [acc_list, nfr_list])
-
-def solveT(old_logit_list, new_logit_list):
-    def compute(old_logit_list, new_logit_list, init_T = 1.0, reg=0.0):
-        T1 = nn.Parameter(torch.ones(1).cuda() * init_T)
-        optimizer = optim.LBFGS([T1], lr=1,line_search_fn='strong_wolfe')
-        mse_loss = nn.MSELoss()
-        # nll_criterion = nn.CrossEntropyLoss().cuda()
-        def eval():
-            optimizer.zero_grad()
-            p = F.softmax(temperature_scale(old_logit_list, T1), dim=-1)
-            q = F.softmax(new_logit_list, dim=-1)
-            # loss = F.kl_div(p.log(), q, reduction='batchmean') + F.kl_div(q.log(), p, reduction='batchmean')
-            loss = mse_loss(p, q) + reg * T1.square()
-            loss.backward()
-            return loss
-        optimizer.step(eval)
-        return T1
-
-    T0 = 2.0 # initial point
-    best_loss = 1e6
-    mse_loss = nn.MSELoss()
-    T1 = compute(old_logit_list, new_logit_list, init_T = T0, reg=0.0)
-
-    with torch.no_grad():
-        p = F.softmax(temperature_scale(old_logit_list, T1), dim=-1)
-        q = F.softmax(new_logit_list, dim=-1)
-        # loss = F.kl_div(p.log(), q, reduction='batchmean') + F.kl_div(q.log(), p, reduction='batchmean')
-        loss = mse_loss(p, q) 
-
-    best_T = T1
-    best_loss = loss.item()    
-    print('T: {}, loss: {}'.format(best_T.item(), loss.item()))
-    return best_T
     
 
 
