@@ -1,6 +1,7 @@
 # About The Project
 Implementation of paper *Lightweight Approaches to DNN Regression Error Reduction: An Uncertainty Alignment Perspective*
 
+Note: the reported NFR (negative flip rate) is essentially the regression error rate.  
 
 
 ## Requirements
